@@ -1,0 +1,485 @@
+version: '3.9'
+
+services:
+  # Ollama Service with GPU support
+  ollama:
+    image: ollama/ollama:latest
+    container_name: midas-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      # Windows path for model storage
+      - ollama-models:/root/.ollama
+      # Bind mount for custom models
+      - ./ollama/models:/models:ro
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/root/.ollama/models
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_MAX_LOADED_MODELS=3
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_MAX_QUEUE=128
+      - OLLAMA_CONCURRENCY=4
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=f16
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # Qdrant Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: midas-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      # Windows volume for vector data persistence
+      - qdrant-storage:/qdrant/storage
+      - ./qdrant/config/production-windows.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__STORAGE__WAL__WAL_CAPACITY_MB=512
+      - QDRANT__STORAGE__OPTIMIZERS__MEMMAP_THRESHOLD_KB=500000
+      - QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER=8
+      - QDRANT__STORAGE__OPTIMIZERS__OPTIMIZER_CPU_BUDGET=8
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=8
+      - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=64
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: midas-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      # Windows volumes for data persistence
+      - postgres-data:/var/lib/postgresql/data
+      # Initialization scripts
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      # Backup directory
+      - ./postgres/backups:/backups
+      # Performance configuration
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=en_US.utf8 --lc-ctype=en_US.utf8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      # Performance settings
+      - POSTGRES_SHARED_BUFFERS=1GB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=3GB
+      - POSTGRES_MAINTENANCE_WORK_MEM=256MB
+      - POSTGRES_CHECKPOINT_COMPLETION_TARGET=0.7
+      - POSTGRES_WAL_BUFFERS=16MB
+      - POSTGRES_DEFAULT_STATISTICS_TARGET=100
+      - POSTGRES_RANDOM_PAGE_COST=1.1
+      - POSTGRES_EFFECTIVE_IO_CONCURRENCY=200
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAX_WORKER_PROCESSES=8
+      - POSTGRES_MAX_PARALLEL_WORKERS_PER_GATHER=4
+      - POSTGRES_MAX_PARALLEL_WORKERS=8
+      - POSTGRES_MAX_PARALLEL_MAINTENANCE_WORKERS=4
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c effective_cache_size=3GB
+      -c maintenance_work_mem=256MB
+      -c checkpoint_completion_target=0.7
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=32MB
+      -c max_worker_processes=8
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=8
+      -c max_parallel_maintenance_workers=4
+      -c max_connections=100
+      -c log_statement=all
+      -c log_min_duration_statement=1000
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-midas_user} -d ${POSTGRES_DB:-midas}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # Redis for Celery
+  redis:
+    image: redis:7-alpine
+    container_name: midas-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      # Windows volume for Redis persistence
+      - redis-data:/data
+      - ./redis/redis-windows-optimized.conf:/usr/local/etc/redis/redis.conf:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    environment:
+      - REDIS_REPLICATION_MODE=master
+      - REDIS_MAXMEMORY=4gb
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # Streamlit Application
+  streamlit:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.streamlit
+    container_name: midas-streamlit
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # Application code
+      - ./:/app:ro
+      # Data directory for uploads/downloads
+      - ./data:/app/data
+      # Windows AppData for dashboards
+      - streamlit-appdata:/app/appdata
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - OLLAMA_HOST=ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PYTHONPATH=/app
+      - APPDATA=/app/appdata
+    depends_on:
+      - ollama
+      - qdrant
+      - postgres
+      - redis
+    secrets:
+      - postgres_password
+      - app_secret_key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # Celery Worker for Document Processing
+  celery-worker-docs:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.celery
+    container_name: midas-celery-docs
+    restart: unless-stopped
+    command: celery -A celery_config worker --loglevel=info --concurrency=2 -Q documents -n worker-docs@%h
+    volumes:
+      - ./:/app:ro
+      - ./data:/app/data
+      - celery-logs:/app/logs
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OLLAMA_HOST=ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+      - PYTHONPATH=/app
+      - C_FORCE_ROOT=true
+    depends_on:
+      - redis
+      - ollama
+      - qdrant
+      - postgres
+    secrets:
+      - postgres_password
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+    networks:
+      - midas-network
+
+  # Celery Worker for Analysis Tasks
+  celery-worker-analysis:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.celery
+    container_name: midas-celery-analysis
+    restart: unless-stopped
+    command: celery -A celery_config worker --loglevel=info --concurrency=1 -Q analysis -n worker-analysis@%h
+    volumes:
+      - ./:/app:ro
+      - ./data:/app/data
+      - celery-logs:/app/logs
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OLLAMA_HOST=ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+      - PYTHONPATH=/app
+      - C_FORCE_ROOT=true
+    depends_on:
+      - redis
+      - ollama
+      - qdrant
+      - postgres
+    secrets:
+      - postgres_password
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+    networks:
+      - midas-network
+
+  # Celery Beat Scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.celery
+    container_name: midas-celery-beat
+    restart: unless-stopped
+    command: celery -A celery_config beat --loglevel=info
+    volumes:
+      - ./:/app:ro
+      - celery-beat-schedule:/app/celerybeat-schedule
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - PYTHONPATH=/app
+    depends_on:
+      - redis
+    networks:
+      - midas-network
+
+  # Flower for Celery Monitoring
+  flower:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.celery
+    container_name: midas-flower
+    restart: unless-stopped
+    command: celery -A celery_config flower --port=5555
+    ports:
+      - "5555:5555"
+    volumes:
+      - ./:/app:ro
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - FLOWER_BASIC_AUTH=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-admin}
+      - PYTHONPATH=/app
+    depends_on:
+      - redis
+    networks:
+      - midas-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: midas-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-cache:/var/cache/nginx
+      - nginx-logs:/var/log/nginx
+    environment:
+      - NGINX_HOST=${DOMAIN_NAME:-localhost}
+      - NGINX_PORT=80
+    depends_on:
+      - streamlit
+      - flower
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - midas-network
+
+  # Backup Service
+  backup:
+    image: offen/docker-volume-backup:latest
+    container_name: midas-backup
+    restart: unless-stopped
+    volumes:
+      - postgres-data:/backup/postgres-data:ro
+      - qdrant-storage:/backup/qdrant-storage:ro
+      - redis-data:/backup/redis-data:ro
+      - streamlit-appdata:/backup/streamlit-appdata:ro
+      - ./backups:/archive
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - BACKUP_CRON_EXPRESSION=0 2 * * *
+      - BACKUP_FILENAME=midas-backup-%Y-%m-%d_%H-%M-%S.tar.gz
+      - BACKUP_ARCHIVE=/archive
+      - BACKUP_RETENTION_DAYS=7
+      - BACKUP_STOP_CONTAINER_LABEL=midas-backup-stop
+      - NOTIFICATION_URL=${BACKUP_NOTIFICATION_URL:-}
+    networks:
+      - midas-network
+
+# Docker Networks
+networks:
+  midas-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# Docker Volumes (Windows-compatible)
+volumes:
+  ollama-models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ollama-models
+  
+  qdrant-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/qdrant-storage
+  
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/postgres-data
+  
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/redis-data
+  
+  streamlit-appdata:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/streamlit-appdata
+  
+  celery-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/celery-logs
+  
+  celery-beat-schedule:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/celery-beat-schedule
+  
+  nginx-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/nginx-cache
+  
+  nginx-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/nginx-logs
+
+# Docker Secrets
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  app_secret_key:
+    file: ./secrets/app_secret_key.txt

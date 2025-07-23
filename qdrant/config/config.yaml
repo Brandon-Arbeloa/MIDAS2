@@ -1,0 +1,12 @@
+﻿storage:
+  storage_path: /qdrant/storage
+  wal:
+    wal_capacity_mb: 256
+  optimizers:
+    memmap_threshold_kb: 200000
+
+service:
+  http_port: 6333
+  grpc_port: 6334
+
+log_level: INFO

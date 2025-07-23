@@ -1,0 +1,650 @@
+version: '3.9'
+
+services:
+  # Production-optimized MIDAS services with performance enhancements for Windows 11
+  
+  # Ollama Service with optimized GPU support
+  ollama:
+    image: ollama/ollama:latest
+    container_name: midas-ollama-prod
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+      - ./ollama/models:/models:ro
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_MODELS=/root/.ollama/models
+      - OLLAMA_NUM_PARALLEL=6
+      - OLLAMA_MAX_LOADED_MODELS=4
+      - OLLAMA_KEEP_ALIVE=15m
+      - OLLAMA_MAX_QUEUE=256
+      - OLLAMA_CONCURRENCY=8
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=f16
+      - OLLAMA_BATCH_SIZE=512
+      - OLLAMA_CTX_SIZE=4096
+    deploy:
+      resources:
+        limits:
+          cpus: '16.0'
+          memory: 32G
+        reservations:
+          cpus: '8.0'
+          memory: 16G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # Qdrant Vector Database with Windows production optimization
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: midas-qdrant-prod
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-storage:/qdrant/storage
+      - ./qdrant/config/production-windows.yaml:/qdrant/config/production.yaml:ro
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__STORAGE__STORAGE_PATH=/qdrant/storage
+      - QDRANT__STORAGE__WAL__WAL_CAPACITY_MB=1024
+      - QDRANT__STORAGE__OPTIMIZERS__MEMMAP_THRESHOLD_KB=1000000
+      - QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER=16
+      - QDRANT__STORAGE__OPTIMIZERS__OPTIMIZER_CPU_BUDGET=16
+      - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=16
+      - QDRANT__SERVICE__MAX_REQUEST_SIZE_MB=128
+      - QDRANT__STORAGE__HNSW__M=128
+      - QDRANT__STORAGE__HNSW__EF_CONSTRUCT=512
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # PostgreSQL with production-grade performance
+  postgres:
+    image: postgres:15-alpine
+    container_name: midas-postgres-prod
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/backups:/backups
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=en_US.utf8 --lc-ctype=en_US.utf8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    command: >
+      postgres
+      -c shared_buffers=4GB
+      -c effective_cache_size=12GB
+      -c maintenance_work_mem=1GB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=64MB
+      -c default_statistics_target=1000
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=64MB
+      -c max_worker_processes=16
+      -c max_parallel_workers_per_gather=8
+      -c max_parallel_workers=16
+      -c max_parallel_maintenance_workers=8
+      -c max_connections=200
+      -c log_statement=none
+      -c log_min_duration_statement=5000
+      -c checkpoint_timeout=15min
+      -c max_wal_size=4GB
+      -c min_wal_size=1GB
+      -c wal_level=replica
+      -c archive_mode=on
+      -c archive_command='test ! -f /backups/archive/%f && cp %p /backups/archive/%f'
+      -c synchronous_commit=off
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-midas_user} -d ${POSTGRES_DB:-midas}"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # Redis with production caching optimization
+  redis:
+    image: redis:7-alpine
+    container_name: midas-redis-prod
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis/redis-windows-optimized.conf:/usr/local/etc/redis/redis.conf:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    environment:
+      - REDIS_REPLICATION_MODE=master
+      - REDIS_MAXMEMORY=8gb
+      - REDIS_MAXMEMORY_POLICY=allkeys-lru
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # FastAPI Backend with performance optimization
+  backend:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.fastapi
+      args:
+        - BUILD_ENV=production
+    container_name: midas-backend-prod
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-midas_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-midas}?pool_size=20&max_overflow=30
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - SECRET_KEY_FILE=/run/secrets/app_secret_key
+      - ENVIRONMENT=production
+      - PYTHONPATH=/app
+      - WORKERS=8
+      - MAX_REQUESTS=1000
+      - MAX_REQUESTS_JITTER=100
+      - TIMEOUT=120
+      - KEEPALIVE=5
+      - PRELOAD_APP=true
+      - WORKER_CLASS=uvicorn.workers.UvicornWorker
+      - LOG_LEVEL=info
+      - ACCESS_LOG=true
+    command: >
+      gunicorn
+      --bind 0.0.0.0:8000
+      --workers 8
+      --worker-class uvicorn.workers.UvicornWorker
+      --max-requests 1000
+      --max-requests-jitter 100
+      --timeout 120
+      --keepalive 5
+      --preload
+      --access-logfile -
+      --error-logfile -
+      --log-level info
+      main:app
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+      - qdrant
+    secrets:
+      - postgres_password
+      - app_secret_key
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # React Frontend (production build)
+  frontend:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.react
+      args:
+        - BUILD_ENV=production
+        - NODE_ENV=production
+    container_name: midas-frontend-prod
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000
+      - NGINX_WORKER_PROCESSES=auto
+      - NGINX_WORKER_CONNECTIONS=2048
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # Celery Workers with Windows optimization
+  celery-worker-docs:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.fastapi
+    container_name: midas-celery-docs-prod
+    restart: unless-stopped
+    command: >
+      celery -A celery_config worker
+      --loglevel=info
+      --concurrency=8
+      --prefetch-multiplier=1
+      --max-tasks-per-child=1000
+      --time-limit=300
+      --soft-time-limit=240
+      -Q documents
+      -n worker-docs@%h
+    volumes:
+      - ./backend:/app:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-midas_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-midas}
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - PYTHONPATH=/app
+      - C_FORCE_ROOT=true
+      - CELERY_OPTIMIZATION=true
+    deploy:
+      replicas: 4
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+      - qdrant
+    secrets:
+      - postgres_password
+    networks:
+      - midas-network
+
+  # Celery Worker for Analysis (GPU-accelerated)
+  celery-worker-analysis:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.fastapi
+    container_name: midas-celery-analysis-prod
+    restart: unless-stopped
+    command: >
+      celery -A celery_config worker
+      --loglevel=info
+      --concurrency=4
+      --prefetch-multiplier=1
+      --max-tasks-per-child=500
+      --time-limit=600
+      --soft-time-limit=540
+      -Q analysis,embeddings
+      -n worker-analysis@%h
+    volumes:
+      - ./backend:/app:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-midas_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-midas}
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - PYTHONPATH=/app
+      - C_FORCE_ROOT=true
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 16G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - redis
+      - postgres
+      - ollama
+      - qdrant
+    secrets:
+      - postgres_password
+    networks:
+      - midas-network
+
+  # Celery Beat Scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.fastapi
+    container_name: midas-celery-beat-prod
+    restart: unless-stopped
+    command: >
+      celery -A celery_config beat
+      --loglevel=info
+      --schedule=/app/celerybeat-schedule
+      --pidfile=/app/celerybeat.pid
+    volumes:
+      - ./backend:/app:ro
+      - celery-beat-schedule:/app
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-midas_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-midas}
+      - PYTHONPATH=/app
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - midas-network
+
+  # Nginx Load Balancer with Windows optimization
+  nginx:
+    image: nginx:alpine
+    container_name: midas-nginx-prod
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx-production.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx-cache:/var/cache/nginx
+      - nginx-logs:/var/log/nginx
+    environment:
+      - NGINX_HOST=${DOMAIN_NAME:-localhost}
+      - NGINX_WORKER_PROCESSES=auto
+      - NGINX_WORKER_CONNECTIONS=2048
+      - NGINX_KEEPALIVE_TIMEOUT=65
+      - NGINX_CLIENT_MAX_BODY_SIZE=100M
+    depends_on:
+      - backend
+      - frontend
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+    networks:
+      - midas-network
+
+  # Production Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: midas-prometheus-prod
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus-production.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--storage.tsdb.max-block-duration=2h'
+      - '--storage.tsdb.min-block-duration=2h'
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    networks:
+      - midas-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: midas-grafana-prod
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD_FILE=/run/secrets/grafana_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_DOMAIN=${DOMAIN_NAME:-localhost}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel,grafana-piechart-panel
+      - GF_FEATURE_TOGGLES_ENABLE=newNavigation
+      - GF_LOG_LEVEL=warn
+      - GF_DATABASE_TYPE=postgres
+      - GF_DATABASE_HOST=postgres:5432
+      - GF_DATABASE_NAME=${POSTGRES_DB:-midas}_grafana
+      - GF_DATABASE_USER=${POSTGRES_USER:-midas_user}
+      - GF_DATABASE_PASSWORD_FILE=/run/secrets/postgres_password
+    secrets:
+      - postgres_password
+      - grafana_password
+    depends_on:
+      - prometheus
+      - postgres
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    networks:
+      - midas-network
+
+  # Automated backup service
+  backup:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.backup
+    container_name: midas-backup-prod
+    restart: unless-stopped
+    volumes:
+      - postgres-data:/backup/postgres-data:ro
+      - qdrant-storage:/backup/qdrant-storage:ro
+      - redis-data:/backup/redis-data:ro
+      - ./backups:/archive
+      - ./scripts/backup:/scripts
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - BACKUP_CRON_EXPRESSION=0 2 * * *
+      - BACKUP_FILENAME=midas-prod-backup-%Y-%m-%d_%H-%M-%S.tar.gz
+      - BACKUP_ARCHIVE=/archive
+      - BACKUP_RETENTION_DAYS=30
+      - BACKUP_COMPRESSION_LEVEL=6
+      - NOTIFICATION_URL=${BACKUP_NOTIFICATION_URL:-}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_DB=${POSTGRES_DB:-midas}
+      - POSTGRES_USER=${POSTGRES_USER:-midas_user}
+    secrets:
+      - postgres_password
+    depends_on:
+      - postgres
+      - redis
+      - qdrant
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - midas-network
+
+# Production Networks
+networks:
+  midas-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.driver.mtu: "1500"
+
+# Production Volumes with optimizations
+volumes:
+  ollama-models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/ollama-models
+
+  qdrant-storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/qdrant-storage
+
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/postgres-data
+
+  redis-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/redis-data
+
+  celery-beat-schedule:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/celery-beat-schedule
+
+  nginx-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/nginx-cache
+
+  nginx-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/nginx-logs
+
+  prometheus-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/prometheus-data
+
+  grafana-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./volumes/grafana-data
+
+# Production Secrets
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
+  app_secret_key:
+    file: ./secrets/app_secret_key.txt
+  grafana_password:
+    file: ./secrets/grafana_password.txt

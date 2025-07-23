@@ -1,0 +1,131 @@
+# Qdrant Configuration for Windows 11 Production Environment
+# Optimized for MIDAS RAG System with high-performance vector search
+
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+  
+  # Windows-optimized service settings
+  max_request_size_mb: 64
+  max_workers: 8
+  enable_cors: true
+  cors_allow_credentials: true
+
+cluster:
+  # Clustering disabled for single-node Windows deployment
+  enabled: false
+
+storage:
+  # Storage path optimized for Windows
+  storage_path: /qdrant/storage
+  
+  # Performance-optimized storage settings
+  snapshots_path: /qdrant/snapshots
+  temp_path: /qdrant/temp
+  
+  # Windows-specific optimizations
+  wal:
+    wal_capacity_mb: 512
+    wal_segments_ahead: 2
+    
+  performance:
+    max_search_threads: 8
+    search_pool_size: 16
+    
+  # Memory management for Windows
+  memory:
+    # Use 70% of available memory for operations
+    storage_memory_quota_mb: 7168  # 7GB for 16GB system
+    index_memory_quota_mb: 2048    # 2GB for indexing
+    
+  # Optimizations for SSD storage on Windows
+  disk:
+    # Faster disk operations
+    sync_write_operations: true
+    fsync_threshold_kb: 1024
+    
+  # Vector indexing optimizations
+  hnsw:
+    # Optimized for Windows hardware
+    m: 64                    # Increased connections for better recall
+    ef_construct: 256        # Higher build quality
+    max_indexing_threads: 8  # Match CPU cores
+    
+  # Payload indexing for fast filtering
+  payload:
+    # Enable payload indexing for all collections
+    enable_payload_index: true
+    payload_index_threshold: 10000
+
+log_level: INFO
+
+# TLS Configuration (production ready)
+tls:
+  # Disable for local development, enable for production
+  enabled: false
+  # cert: /qdrant/tls/cert.pem
+  # key: /qdrant/tls/key.pem
+
+# Console API access control
+telemetry:
+  # Disable telemetry for on-premises deployment
+  disabled: true
+
+# Metrics and monitoring
+metrics:
+  enabled: true
+
+# Windows-specific optimizations
+optimizations:
+  # Thread settings optimized for Windows
+  default_segment_number: 8
+  optimizer_cpu_budget: 8
+  
+  # Memory pool settings
+  memmap_threshold_kb: 500000  # 500MB threshold for memory mapping
+  
+  # Index optimization
+  indexing_threshold: 20000
+  flush_interval_sec: 5
+  
+  # Query optimization
+  max_concurrent_searches: 32
+  search_timeout_ms: 30000
+  
+  # Windows I/O optimizations
+  io:
+    # Use Windows overlapped I/O
+    async_io: true
+    io_uring: false  # Not available on Windows
+    direct_io: false # May not work well on Windows
+    
+# Collection defaults optimized for RAG embeddings
+collections:
+  default_vector_size: 1536  # OpenAI embedding size
+  default_distance: Cosine   # Best for embeddings
+  
+  # Replication settings (disabled for single node)
+  replication_factor: 1
+  write_consistency_factor: 1
+  
+  # Quantization for memory efficiency
+  quantization:
+    # Use scalar quantization for Windows
+    scalar:
+      type: int8
+      quantile: 0.99
+      always_ram: false
+    
+  # Indexing parameters for embedding search
+  hnsw_config:
+    m: 64
+    ef_construct: 256
+    full_scan_threshold: 10000
+    max_indexing_threads: 8
+    on_disk: false  # Keep in memory for faster access
+    
+  # Payload settings
+  wal_config:
+    wal_capacity_mb: 512
+    wal_segments_ahead: 2
